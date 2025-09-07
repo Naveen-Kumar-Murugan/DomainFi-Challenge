@@ -22,7 +22,6 @@ const App = () => (
           <Route path="/marketplace" element={<Marketplace />} />
           <Route path="/etfs" element={<ETFs />} />
           <Route path="/trends" element={<Trends />} />
-          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>

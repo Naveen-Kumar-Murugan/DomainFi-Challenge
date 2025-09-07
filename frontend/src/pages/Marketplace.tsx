@@ -1,4 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { parseEther } from 'viem';
+import { toast } from "sonner";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -6,32 +9,205 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import NavigationEnhanced from "@/components/NavigationEnhanced";
 import { Search, Filter, Clock, Users, TrendingUp, Gavel, Flame, Sparkles, Eye } from "lucide-react";
-import { useReadContract } from 'wagmi';
 import { AUCTION_CONTRACT_ADDRESS, AUCTION_ABI } from '@/constants/contracts';
+import CreateAuctionModal from "@/components/CreateAuctionModal";
+import { useRef } from "react";
+import { useInterval } from '@/hooks/useInterval';
+
+// Add TypeScript interface for auction data
+interface AuctionData {
+  auctionId: number;
+  domainName: string;
+  tokenId: number;
+  owner: string;
+  currentBid: bigint;
+  highestBidder: string;
+  bidCount: number;
+  endTime: number;
+  category: string;
+  finalized: boolean;
+}
 
 const Marketplace = () => {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedFilter, setSelectedFilter] = useState("All Auctions");
+  const [bidAmount, setBidAmount] = useState('');
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
 
-  // Fetch auctions from contract
-  const { data: auctionsData, isLoading } = useReadContract({
+  // Add bid amount state per auction
+  const [bidAmounts, setBidAmounts] = useState<{ [key: number]: string }>({});
+
+  // Read all auctions with proper typing
+  const { data: auctionsData, isLoading: isLoadingAuctions } = useReadContract({
     address: AUCTION_CONTRACT_ADDRESS,
     abi: AUCTION_ABI,
     functionName: 'getAllAuctions',
-  });
+  }) as { data: AuctionData[] | undefined, isLoading: boolean };
 
-  // Transform contract data to frontend format
-  const auctions = (auctionsData || []).map((auction: any) => ({
-    domain: auction.domainName,
-    currentBid: `$${auction.currentBid.toString()}`,
-    bids: auction.bidCount,
-    timeLeft: `${Math.max(0, Math.floor((auction.endTime * 1000 - Date.now()) / 3600000))}h`,
-    category: auction.category,
-    categoryColor: "bg-gradient-to-r from-primary to-primary-glow", // Map category to color as needed
-    status: auction.finalized ? "ended" : "active",
-    growth: "+0.0%", // Placeholder, replace with AI output
-    watchers: 0 // Placeholder, add watcher logic if needed
-  }));
+  // Write contract for placing bids
+  const { writeContract, data: bidTxData } = useWriteContract();
+  
+  // Wait for bid transaction
+  const { isLoading: isBidLoading, isSuccess: isBidSuccess } = 
+    useWaitForTransactionReceipt({ hash: bidTxData });
+
+  // Write contract for creating auctions
+  const { writeContract: createAuction, data: createAuctionTxData } = useWriteContract();
+  
+  // Wait for create auction transaction
+  const { isLoading: isCreatingAuction, isSuccess: isCreateSuccess } = 
+    useWaitForTransactionReceipt({ hash: createAuctionTxData });
+
+  // Store the last auctionId bid on
+  
+  const lastBidAuctionId = useRef<number | null>(null);
+
+  // Add effect to handle bid success
+  useEffect(() => {
+    if (isBidSuccess && lastBidAuctionId.current !== null) {
+      toast.success("Bid placed successfully!");
+      // Clear bid amount for the successful bid
+      setBidAmounts(prev => ({ ...prev, [lastBidAuctionId.current!]: '' }));
+      lastBidAuctionId.current = null;
+    }
+  }, [isBidSuccess]);
+
+  // Add debug logging for transaction states
+  useEffect(() => {
+    if (bidTxData) {
+      console.log('Bid transaction data:', bidTxData);
+    }
+  }, [bidTxData]);
+
+  useEffect(() => {
+    console.log('Bid loading:', isBidLoading);
+    console.log('Bid success:', isBidSuccess);
+  }, [isBidLoading, isBidSuccess]);
+
+  const handlePlaceBid = async (auctionId: number) => {
+    try {
+      console.log('Starting bid process for auction:', auctionId);
+      const bidAmount = bidAmounts[auctionId];
+      
+      if (!bidAmount) {
+        toast.error("Please enter a bid amount");
+        return;
+      }
+
+      console.log('Bid amount:', bidAmount, 'ETH');
+      const parsedValue = parseEther(bidAmount);
+      console.log('Parsed value (wei):', parsedValue.toString());
+
+      const config = {
+        address: AUCTION_CONTRACT_ADDRESS,
+        abi: AUCTION_ABI,
+        functionName: 'bid',
+        args: [auctionId],
+        value: parsedValue
+      } as const;
+
+      console.log('Contract config:', config);
+      lastBidAuctionId.current = auctionId;
+
+      const loadingToast = toast.loading("Preparing bid transaction...");
+      const tx = await writeContract(config);
+      console.log('Transaction submitted:', tx);
+      console.log ("loadingToast", loadingToast);
+      toast.loading("Transaction submitted. Waiting for confirmation...");
+      if(isBidSuccess)toast.dismiss();
+      
+    } catch (error: any) {
+      console.error('Detailed bid error:', {
+        error,
+        message: error?.message,
+        data: error?.data,
+        code: error?.code
+      });
+      
+      // More specific error messages
+      let errorMessage = "Failed to place bid. ";
+      if (error?.message?.includes("insufficient funds")) {
+        errorMessage += "Insufficient funds in wallet.";
+      } else if (error?.message?.includes("user rejected")) {
+        errorMessage += "Transaction was rejected.";
+      } else if (error?.message?.includes("Bid too low")) {
+        errorMessage += "Bid amount is too low.";
+      } else {
+        errorMessage += error?.message || "Please try again.";
+      }
+      
+      toast.error(errorMessage);
+      toast.dismiss(); // Dismiss any loading toasts
+    }
+  };
+
+  const handleCreateAuction = async (auctionData: {
+    domainName: string;
+    duration: string;  // removed startingPrice
+    category: string;
+  }) => {
+    try {
+      const config = {
+        address: AUCTION_CONTRACT_ADDRESS,
+        abi: AUCTION_ABI,
+        functionName: 'createAuction',
+        args: [
+          auctionData.domainName,
+          0, // tokenId
+          Number(auctionData.duration) * 3600,
+          auctionData.category
+        ]
+      } as const;
+
+      toast.loading("Creating auction...");
+      await createAuction(config);
+    } catch (error) {
+      console.error('Error creating auction:', error);
+      toast.error("Failed to create auction");
+    }
+  };
+
+  // Add this effect to handle create auction success
+  useEffect(() => {
+    if (isCreateSuccess) {
+      toast.success("Auction created successfully!", { duration: 5000 });
+      setIsCreateModalOpen(false);
+      toast.dismiss();
+    }
+  }, [isCreateSuccess]);
+
+  const [currentTime, setCurrentTime] = useState(Date.now());
+  
+  // Update time every minute
+  useInterval(() => {
+    setCurrentTime(Date.now());
+  }, 60000);
+
+  // Filter and transform auctions
+  const activeAuctions = (auctionsData || [])
+    .filter((auction: AuctionData) => {
+      const endTimeMs = Number(auction.endTime) * 1000;
+      return !auction.finalized && endTimeMs > Date.now();
+    })
+    .map((auction: AuctionData) => {
+      const endTimeMs = Number(auction.endTime) * 1000;
+      const timeLeftMs = endTimeMs - currentTime;
+      const hours = Math.floor(timeLeftMs / (1000 * 60 * 60));
+      const minutes = Math.floor((timeLeftMs % (1000 * 60 * 60)) / (1000 * 60));
+      
+      return {
+        ...auction,
+        id: Number(auction.auctionId),
+        domain: auction.domainName,
+        currentBid: `${Number(auction.currentBid) / 1e18} ETH`,
+        bids: Number(auction.bidCount),
+        timeLeft: `${hours}h ${minutes}m`,
+        category: auction.category,
+        categoryColor: "bg-gradient-to-r from-primary to-primary-glow",
+        owner: auction.owner,
+        highestBidder: auction.highestBidder,
+      };
+    });
 
   return (
     <div className="min-h-screen bg-background font-inter overflow-x-hidden">
@@ -92,7 +268,7 @@ const Marketplace = () => {
 
           {/* Enhanced Auction Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-            {auctions.map((auction, index) => (
+            {activeAuctions.map((auction, index) => (
               <Card key={index} className="group relative p-8 border-border/50 hover:border-primary/30 bg-gradient-card backdrop-blur-sm shadow-card hover:shadow-premium transition-all duration-500 hover:scale-[1.02] overflow-hidden">
                 {/* Animated Background */}
                 <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-primary-glow/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
@@ -118,10 +294,6 @@ const Marketplace = () => {
                           {auction.category === "Hot" && <Flame className="w-3 h-3 mr-1" />}
                           {auction.category}
                         </Badge>
-                        <div className="flex items-center gap-1 text-success text-sm font-semibold">
-                          <TrendingUp className="w-3 h-3" />
-                          {auction.growth}
-                        </div>
                       </div>
                     </div>
                   </div>
@@ -144,12 +316,20 @@ const Marketplace = () => {
                     </div>
                     <div className="text-center">
                       <div className="flex items-center justify-center gap-1 text-muted-foreground mb-1">
-                        <Eye className="w-4 h-4" />
+                        <Users className="w-4 h-4" />
                       </div>
-                      <div className="text-lg font-bold text-card-foreground">{auction.watchers}</div>
-                      <div className="text-xs text-muted-foreground">Watching</div>
+                      <div className="text-sm font-medium truncate">{`${auction.owner.slice(0, 6)}...${auction.owner.slice(-4)}`}</div>
+                      <div className="text-xs text-muted-foreground">Owner</div>
                     </div>
                   </div>
+
+                  {/* Add Highest Bidder Info */}
+                  {auction.highestBidder !== "0x0000000000000000000000000000000000000000" && (
+                    <div className="mt-4 text-sm text-muted-foreground">
+                      <span className="font-medium">Highest Bidder:</span>{" "}
+                      {`${auction.highestBidder.slice(0, 6)}...${auction.highestBidder.slice(-4)}`}
+                    </div>
+                  )}
 
                   {/* Price & Actions */}
                   <div className="space-y-6">
@@ -161,12 +341,29 @@ const Marketplace = () => {
                     </div>
                     
                     <div className="flex gap-4">
-                      <Button className="flex-1 bg-gradient-button hover:bg-gradient-button-hover text-primary-foreground font-semibold py-4 rounded-xl shadow-button hover:shadow-glow transition-all duration-300 hover:scale-105 font-inter">
-                        <Gavel className="w-4 h-4 mr-2" />
-                        Place Bid
-                      </Button>
-                      <Button variant="outline" className="px-6 border-primary/30 text-primary hover:bg-primary hover:text-primary-foreground py-4 rounded-xl transition-all duration-300 hover:scale-105 font-inter">
-                        <Eye className="w-4 h-4" />
+                      <Input
+                        type="number"
+                        placeholder="Enter bid amount in ETH"
+                        value={bidAmounts[auction.id] || ''}
+                        onChange={(e) => setBidAmounts(prev => ({
+                          ...prev,
+                          [auction.id]: e.target.value
+                        }))}
+                        className="flex-1"
+                      />
+                      <Button 
+                        onClick={() => handlePlaceBid(auction.id)}
+                        disabled={isBidLoading || auction.finalized}
+                        className="flex-1 bg-gradient-button hover:bg-gradient-button-hover text-primary-foreground font-semibold py-4 rounded-xl shadow-button hover:shadow-glow transition-all duration-300 hover:scale-105 font-inter"
+                      >
+                        {isBidLoading ? (
+                          "Bidding..."
+                        ) : (
+                          <>
+                            <Gavel className="w-4 h-4 mr-2" />
+                            Place Bid
+                          </>
+                        )}
                       </Button>
                     </div>
                   </div>
@@ -179,6 +376,25 @@ const Marketplace = () => {
               </Card>
             ))}
           </div>
+
+          {/* Add Create Auction button in the header section */}
+          <div className="flex gap-4">
+            <Button 
+              onClick={() => setIsCreateModalOpen(true)}
+              className="bg-gradient-button hover:bg-gradient-button-hover text-primary-foreground px-6 py-3 rounded-xl font-semibold shadow-button hover:shadow-glow transition-all duration-300 hover:scale-105 font-inter"
+            >
+              <Gavel className="w-4 h-4 mr-2" />
+              Create Auction
+            </Button>
+          </div>
+
+          {/* Add CreateAuctionModal */}
+          <CreateAuctionModal
+            isOpen={isCreateModalOpen}
+            onClose={() => setIsCreateModalOpen(false)}
+            onCreateAuction={handleCreateAuction}
+            isProcessing={isCreatingAuction}
+          />
         </div>
       </main>
     </div>

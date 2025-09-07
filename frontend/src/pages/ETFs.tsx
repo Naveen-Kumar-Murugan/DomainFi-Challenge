@@ -4,8 +4,39 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import NavigationEnhanced from "@/components/NavigationEnhanced";
 import { TrendingUp, TrendingDown, Sparkles, BarChart, Wallet, Plus, Target, Zap } from "lucide-react";
+import { useState } from 'react';
+import { useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { ETF_CONTRACT_ADDRESS, ETF_ABI } from '@/constants/contracts';
 
 const ETFs = () => {
+  // Read ETF data
+  const { data: etfsData, isLoading: isLoadingETFs } = useReadContract({
+    address: ETF_CONTRACT_ADDRESS,
+    abi: ETF_ABI,
+    functionName: 'getAllETFs',
+  });
+
+  // Write contract for investing
+  const { writeContract: investInETF, data: investTxData } = useWriteContract();
+  
+  // Wait for investment transaction
+  const { isLoading: isInvesting, isSuccess: isInvestSuccess } = 
+    useWaitForTransactionReceipt({ hash: investTxData });
+
+  const handleInvest = async (etfId: number, amount: string) => {
+    try {
+      investInETF({
+        address: ETF_CONTRACT_ADDRESS,
+        abi: ETF_ABI,
+        functionName: 'investInETF',
+        args: [etfId],
+        value: parseEther(amount)
+      });
+    } catch (error) {
+      console.error('Error investing in ETF:', error);
+    }
+  };
+
   const etfs = [
     {
       name: "Tech Giants ETF",
@@ -171,9 +202,19 @@ const ETFs = () => {
                     </div>
                   </div>
 
-                  <Button className="w-full bg-gradient-button hover:bg-gradient-button-hover text-primary-foreground font-semibold py-3 rounded-xl shadow-button hover:shadow-glow transition-all duration-300 hover:scale-105 group-hover:animate-pulse-glow font-inter">
-                    <Wallet className="w-4 h-4 mr-2" />
-                    Invest Now
+                  <Button 
+                    onClick={() => handleInvest(etf.id, etf.minInvestment)}
+                    disabled={isInvesting}
+                    className="w-full bg-gradient-button hover:bg-gradient-button-hover text-primary-foreground font-semibold py-3 rounded-xl shadow-button hover:shadow-glow transition-all duration-300 hover:scale-105 group-hover:animate-pulse-glow font-inter"
+                  >
+                    {isInvesting ? (
+                      "Processing..."
+                    ) : (
+                      <>
+                        <Wallet className="w-4 h-4 mr-2" />
+                        Invest Now
+                      </>
+                    )}
                   </Button>
                 </div>
               </Card>
